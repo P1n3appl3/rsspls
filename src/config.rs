@@ -8,6 +8,7 @@ use basic_toml as toml;
 use cryptoxide::{blake2b::Blake2b, digest::Digest};
 use eyre::WrapErr;
 use log::{debug, warn};
+use regex::Regex;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use simple_eyre::eyre;
 use time::format_description::OwnedFormatItem;
@@ -69,6 +70,8 @@ pub struct DateConfig {
     pub selector: String,
     #[serde(rename = "type", default)]
     type_: DateType,
+    #[serde(default)]
+    pub regex: Option<String>,
     #[serde(deserialize_with = "deserialize_format")]
     pub format: Option<OwnedFormatItem>,
 }
@@ -115,6 +118,19 @@ impl DateConfig {
     }
 
     pub fn parse(&self, date: &str) -> eyre::Result<OffsetDateTime> {
+        let date = if let Some(regex) = &self.regex {
+            let captures = Regex::new(regex)?
+                .captures(date)
+                .ok_or_else(|| eyre::eyre!("no matches"))?;
+            let mut iter = captures.iter();
+            if captures.len() > 1 {
+                _ = iter.next()
+            };
+            let x = iter.flatten().next();
+            x.unwrap().as_str()
+        } else {
+            date
+        };
         match self {
             DateConfig { format: None, .. } => {
                 debug!("attempting to parse {} with anydate", date);
@@ -306,6 +322,7 @@ mod tests {
             selector: String::new(),
             type_: DateType::Date,
             format: Some(time::format_description::parse_owned::<2>(format).unwrap()),
+            regex: None,
         }
     }
 
@@ -314,6 +331,16 @@ mod tests {
             selector: String::new(),
             type_: DateType::Date,
             format: None,
+            regex: None,
+        }
+    }
+
+    fn test_regex(regex: &str) -> DateConfig {
+        DateConfig {
+            selector: String::new(),
+            type_: DateType::Date,
+            format: None,
+            regex: Some(regex.to_owned()),
         }
     }
 
@@ -341,5 +368,16 @@ mod tests {
             .parse("Friday, January 8th, 2021 12:13pm").is_ok());
         assert!(test_date("[weekday case_sensitive:false], [month repr:long case_sensitive:false] [day padding:none], [year] [hour repr:24]:[minute]")
             .parse("Friday, January 8, 2021 21:33").is_ok());
+    }
+
+    #[test]
+    fn test_regex_extraction() {
+        assert!(test_regex("(.*) » ")
+            .parse("January 8, 2021 » more text")
+            .is_ok());
+        assert!(test_regex(": (.*)")
+            .parse("here's a date: 2022-07-13")
+            .is_ok());
+        assert!(test_regex(r"\S+").parse("03/21/1999 01/29/2026").is_ok());
     }
 }
