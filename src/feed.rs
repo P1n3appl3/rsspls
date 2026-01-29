@@ -22,7 +22,7 @@ use crate::Client;
 pub enum ProcessResult {
     NotModified,
     Ok {
-        channel: Channel,
+        channel: Box<Channel>,
         headers: Option<String>,
     },
 }
@@ -92,7 +92,7 @@ pub async fn process_feed(
         .build();
 
     Ok(ProcessResult::Ok {
-        channel,
+        channel: Box::new(channel),
         headers: serialised_headers,
     })
 }
@@ -256,7 +256,7 @@ fn process_item(
         // Guessing the MIME type from the url as we don't have the full media
         let media_mime_type = parsed_url
             .path_segments()
-            .and_then(|segments| segments.last())
+            .and_then(|mut segments| segments.next_back())
             .map(|media_filename| mime_guess::from_path(media_filename).first_or_octet_stream())
             .unwrap_or_else(|| mime::APPLICATION_OCTET_STREAM);
 
@@ -343,9 +343,8 @@ fn parse_date(date: &DateConfig, node: &NodeDataRef<ElementData>) -> Option<Offs
             debug!("trying datetime attribute");
             date.parse(trim_date(datetime)).ok()
         })
-        .map(|x| {
+        .inspect(|_| {
             debug!("using datetime attribute");
-            x
         })
         .or_else(|| {
             let text = node.text_contents();
@@ -667,7 +666,7 @@ mod tests {
     #[test]
     fn test_process_local_files_disabled() {
         let html_file_name = "rsspls.local.html";
-        let local_html = env::temp_dir().join(&html_file_name);
+        let local_html = env::temp_dir().join(html_file_name);
         let url =
             Url::from_file_path(&local_html).expect("unable to construct file URL for test HTML");
 
@@ -691,7 +690,7 @@ mod tests {
             user_agent: None,
             config,
         };
-        let config_hash = ConfigHash(&html_file_name);
+        let config_hash = ConfigHash(html_file_name);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
