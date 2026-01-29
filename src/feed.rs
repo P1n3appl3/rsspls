@@ -54,6 +54,13 @@ pub async fn process_feed(
             FetchResult::NotModified => return Ok(ProcessResult::NotModified),
         };
 
+    #[cfg(feature = "javascript")]
+    let html = if channel_config.config.javascript {
+        execute_javascript(client, html, &url).await?
+    } else {
+        html
+    };
+
     let link_selector = config.link.as_ref().unwrap_or(&config.heading);
 
     let doc = kuchiki::parse_html().one(html);
@@ -393,6 +400,122 @@ fn extract_description(
     }
 }
 
+#[cfg(feature = "javascript")]
+async fn execute_javascript(client: &Client, html: String, url: &Url) -> eyre::Result<String> {
+    use rquickjs::{Context, Object, Runtime};
+    use std::collections::HashMap;
+    info!("executing javascript for {}", url);
+
+    let (inline_scripts, script_urls) = {
+        let doc = kuchiki::parse_html().one(html.clone());
+        let mut inline_scripts = Vec::new();
+        let mut script_urls = Vec::new();
+        if let Ok(nodes) = doc.select("script") {
+            for node in nodes {
+                let attrs = node.attributes.borrow();
+                if let Some(src) = attrs.get("src") {
+                    script_urls.push(url.join(src)?);
+                } else {
+                    inline_scripts.push(node.text_contents());
+                }
+            }
+        }
+        (inline_scripts, script_urls)
+    };
+
+    let mut fetched_scripts = Vec::new();
+    for script_url in script_urls {
+        debug!("fetching script: {}", script_url);
+        let resp = client
+            .http
+            .get(script_url)
+            .send()
+            .await
+            .wrap_err("unable to fetch script")?;
+        let script_text = resp.text().await.wrap_err("unable to read script body")?;
+        fetched_scripts.push(script_text);
+    }
+
+    let doc = kuchiki::parse_html().one(html);
+    let rt = Runtime::new().wrap_err("unable to create rquickjs runtime")?;
+    let ctx = Context::full(&rt).wrap_err("unable to create rquickjs context")?;
+
+    let mock_script = format!(
+        r#"
+        var __rust_document_divs = {{}};
+        var document = {{
+            getElementById: function(id) {{
+                return {{
+                    set innerHTML(html) {{
+                        __rust_document_divs[id] = html;
+                    }},
+                    get innerHTML() {{
+                        return __rust_document_divs[id] || "";
+                    }}
+                }};
+            }},
+        }};
+        var window = {{
+            location: {{
+                pathname: "{}"
+            }}
+        }};
+        "#,
+        url.path()
+    );
+
+    ctx.with(|ctx| -> eyre::Result<()> {
+        ctx.eval::<(), _>(mock_script.as_bytes())
+            .wrap_err("failed to evaluate mock script")?;
+
+        for script in &fetched_scripts {
+            if let Err(e) = ctx.eval::<(), _>(script.as_bytes()) {
+                warn!("error executing script: {}", e);
+            }
+        }
+
+        for script in &inline_scripts {
+            if let Err(e) = ctx.eval::<(), _>(script.as_bytes()) {
+                warn!("error executing inline script: {}", e);
+            }
+        }
+
+        let globals = ctx.globals();
+        let divs_obj: Object = globals
+            .get("__rust_document_divs")
+            .wrap_err("unable to get __rust_document_divs")?;
+        let mut divs = HashMap::new();
+        for prop in divs_obj.props::<String, String>() {
+            let (key, value) = prop.wrap_err("failed to get property from result object")?;
+            divs.insert(key, value);
+        }
+
+        for (id, content) in divs {
+            if let Ok(element) = doc.select_first(&format!("#{}", id)) {
+                for child in element.as_node().children() {
+                    child.detach();
+                }
+
+                let fragment_doc = kuchiki::parse_html().one(content);
+                if let Ok(body) = fragment_doc.select_first("body") {
+                    for child in body.as_node().children() {
+                        element.as_node().append(child);
+                    }
+                }
+            } else {
+                warn!("element with id #{} not found", id);
+            }
+        }
+
+        Ok(())
+    })?;
+
+    let mut new_html = Vec::new();
+    doc.serialize(&mut new_html)
+        .wrap_err("unable to serialize modified html")?;
+    Ok(String::from_utf8(new_html).wrap_err("modified html is not valid utf-8")?)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -431,6 +554,8 @@ mod tests {
             summary: Vec::new(),
             date: None,
             media: None,
+            #[cfg(feature = "javascript")]
+            javascript: false,
         }
     }
 

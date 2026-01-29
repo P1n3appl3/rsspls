@@ -59,6 +59,9 @@ pub struct FeedConfig {
     #[serde(default, deserialize_with = "opt_string_or_struct")]
     pub date: Option<DateConfig>,
     pub media: Option<String>,
+    #[cfg(feature = "javascript")]
+    #[serde(default)]
+    pub javascript: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
