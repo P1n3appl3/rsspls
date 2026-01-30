@@ -226,7 +226,11 @@ fn write_channel(channel: &Channel, output_path: &Path) -> Result<(), Report> {
     // Write the new file into a temporary location, then move it into place
     let file = AtomicFile::new(output_path, atomicwrites::AllowOverwrite);
     file.write(|f| {
-        info!("write {}", output_path.display());
+        info!(
+            "write {} items to {}",
+            channel.items().len(),
+            output_path.display()
+        );
         channel
             .write_to(f)
             .map(drop)
